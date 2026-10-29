@@ -34,6 +34,9 @@ CONTACT_LABEL = os.getenv("CONTACT_LABEL", "投稿联系")
 CONTACT_URL = os.getenv("CONTACT_URL", "https://t.me/my_ccvj3mnxbot")
 MESSAGE_IDS = os.getenv("MESSAGE_IDS", "").strip()
 
+PIN_AFTER_SEND = os.getenv("PIN_AFTER_SEND", "true").lower() in ("1", "true", "yes", "on")
+PIN_NOTIFY = os.getenv("PIN_NOTIFY", "false").lower() in ("1", "true", "yes", "on")
+
 SEPARATOR_RE = re.compile(r'^[ \t]*[-=_*—–~·•▬]{3,}[ \t]*$', re.MULTILINE)
 # =====================================================
 
@@ -63,7 +66,28 @@ def parse_time_range():
     if end_dt <= start_dt:
         raise ValueError("结束时间必须晚于开始时间")
     return start_dt, end_dt
+# 指定辅助
+def _extract_last_message(updates):
+    """从 SendMultiMediaRequest 返回的 Updates 中提取 id 最大的消息对象"""
+    msgs = []
+    for u in getattr(updates, "updates", None) or []:
+        m = getattr(u, "message", None)
+        if m is not None and hasattr(m, "id"):
+            msgs.append(m)
+    if not msgs:
+        return None
+    return max(msgs, key=lambda x: x.id)
 
+
+async def _try_pin(client, target, message):
+    """尝试置顶；失败（无权限等）不抛异常，只打日志"""
+    if not PIN_AFTER_SEND or message is None:
+        return
+    try:
+        await client.pin_message(target, message, notify=PIN_NOTIFY)
+        print(f"  已置顶消息 ID={getattr(message, 'id', '?')}")
+    except Exception as e:
+        print(f"  置顶失败（可能无管理员权限）: {e}")
 
 def trim_message(msg) -> bool:
     """找到第一条分割线，把分割线及其以下内容去掉，同步裁剪 entities。"""
@@ -165,8 +189,9 @@ async def send_one(client, target, msg):
         return
     append_contact_link(msg)
     try:
-        await client.send_message(target, msg)
+        sent = await client.send_message(target, msg)
         print(f"  已发送消息 ID={msg.id}")
+        await _try_pin(client, target, sent)   # ← 新增
     except Exception as e:
         print(f"  消息发送失败 ID={msg.id}: {e}")
 
@@ -224,41 +249,18 @@ async def send_album(client, target, group):
         print(f"  相册无有效媒体，跳过")
         return
 
-    # 尝试发送相册
     try:
         request = functions.messages.SendMultiMediaRequest(
             peer=target,
             multi_media=media_list,
         )
-        await client(request)
+        updates = await client(request)   # ← 改：保存返回值
         ent_count = len(group[0].entities) if group[0].entities else 0
         print(f"  已发送相册（{len(media_list)} 个媒体，entities {ent_count} 个）")
-        return  # 成功，直接返回
-
+        last = _extract_last_message(updates)
+        await _try_pin(client, target, last)   # ← 新增
     except Exception as e:
-        print(f"  相册发送失败（{e}），回退为逐条发送...")
-
-    # 回退方案：逐条发送每个媒体，每个都带上完整 caption
-    for idx, g in enumerate(group):
-        try:
-            # 复制一份，避免修改原消息对象
-            import copy
-            msg_copy = copy.deepcopy(g)
-            # 第一条带上合并后的 caption 和链接，后续留空
-            if idx == 0:
-                msg_copy.message = group[0].message
-                msg_copy.entities = group[0].entities
-            else:
-                msg_copy.message = ""
-                msg_copy.entities = None
-
-            await client.send_message(target, msg_copy)
-            print(f"  已逐条发送媒体 {idx+1}/{len(group)}")
-
-        except Exception as e:
-            print(f"  逐条发送媒体 {idx+1} 失败: {e}")
-
-        await asyncio.sleep(1)  # 每条之间稍作延迟
+        print(f"  相册发送失败: {e}")
 
 async def main():
     if not API_ID or not API_HASH:
