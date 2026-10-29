@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from telethon import TelegramClient
+from telethon.tl.types import MessageEntityTextUrl
 
 load_dotenv()
 
@@ -17,6 +18,16 @@ SOURCE_CHANNEL = os.getenv("SOURCE_CHANNEL", "")
 TARGET_CHANNEL = os.getenv("TARGET_CHANNEL", "")
 SEND_DELAY = float(os.getenv("SEND_DELAY", "1.0"))
 TIMEZONE = os.getenv("TIMEZONE", "UTC")
+CONTACT_LABEL = os.getenv("CONTACT_LABEL", "投稿联系")
+CONTACT_URL = os.getenv("CONTACT_URL", "https://t.em/my_ccvj3mnxbot")
+
+# 匹配“分割线”行：单独一行，由 3 个以上 - = _ * — – ~ · • ▬ 组成
+SEPARATOR_RE = re.compile(r'^[ \t]*[-=_*—–~·•▬]{3,}[ \t]*$', re.MULTILINE)
+
+
+def _utf16_len(s: str) -> int:
+    """Telegram 的 entity 偏移按 UTF-16 计算"""
+    return len(s.encode('utf-16-le')) // 2
 
 
 def parse_time_range():
@@ -29,7 +40,6 @@ def parse_time_range():
     if start_str:
         start_dt = datetime.strptime(start_str, "%Y-%m-%d").replace(tzinfo=tz)
         if end_str:
-            # END_DATE 当天也包含，所以加 1 天
             end_dt = datetime.strptime(end_str, "%Y-%m-%d").replace(tzinfo=tz) + timedelta(days=1)
         else:
             end_dt = start_dt + timedelta(days=1)
@@ -46,27 +56,15 @@ def parse_time_range():
 
 START_DT, END_DT = parse_time_range()
 
-# 匹配“分割线”行：单独一行，由 3 个以上 - = _ * — – ~ · • ▬ 组成
-SEPARATOR_RE = re.compile(r'^[ \t]*[-=_*—–~·•▬]{3,}[ \t]*$', re.MULTILINE)
-# =====================================================
-
-
-def _utf16_len(s: str) -> int:
-    """Telegram 的 entity 偏移按 UTF-16 计算"""
-    return len(s.encode('utf-16-le')) // 2
-
 
 def trim_message(msg) -> bool:
-    """
-    就地修改 msg：找到第一条分割线，把分割线及其以下内容去掉，
-    并同步裁剪 entities，返回是否发生了截断。
-    """
+    """找到第一条分割线，把分割线及其以下内容去掉，同步裁剪 entities。"""
     text = msg.message or ""
     m = SEPARATOR_RE.search(text)
     if not m:
         return False
 
-    new_text = text[:m.start()].rstrip()   # 想保留分割线本身改成 text[:m.end()]
+    new_text = text[:m.start()].rstrip()
     if new_text == text:
         return False
 
@@ -85,6 +83,55 @@ def trim_message(msg) -> bool:
         msg.entities = kept or None
 
     return True
+
+
+def merge_group_captions(group) -> None:
+    """
+    把相册里每个成员的 caption 合并到第一个成员的 caption 上。
+    Telegram 相册只显示第一个媒体的 caption，其余会隐藏；
+    合并后所有文字都能保留在 B 频道。
+    """
+    full_text = ""
+    all_entities = []
+    for g in group:
+        t = g.message or ""
+        if not t:
+            continue
+        if full_text:
+            full_text += "\n\n"
+        base = _utf16_len(full_text)
+        full_text += t
+        if g.entities:
+            for e in g.entities:
+                e.offset += base
+                all_entities.append(e)
+
+    if full_text:
+        group[0].message = full_text
+        group[0].entities = all_entities or None
+
+    for g in group[1:]:
+        g.message = ""
+        g.entities = None
+
+
+def append_contact_link(msg) -> None:
+    """
+    在消息末尾追加链接实体（客户端显示为可点击文字，视觉效果等同 markdown 链接）。
+    注意：Telegram 客户端渲染的是实体，不会显示 [label](url) 这样的原始 markdown 源码。
+    """
+    text = msg.message or ""
+    prefix = (text + "\n\n") if text else ""
+    offset = _utf16_len(prefix)
+    length = _utf16_len(CONTACT_LABEL)
+
+    msg.message = prefix + CONTACT_LABEL
+    entity = MessageEntityTextUrl(offset=offset, length=length, url=CONTACT_URL)
+
+    if msg.entities:
+        msg.entities = list(msg.entities) + [entity]
+    else:
+        msg.entities = [entity]
 
 
 async def copy_channel_by_date():
@@ -113,20 +160,24 @@ async def copy_channel_by_date():
     messages.reverse()
     print(f"共收集到 {len(messages)} 条消息，开始复制...")
 
-    # 3. 按顺序发送，自动合并相册，并应用分割线截断
+    # 3. 按顺序发送，合并相册，追加联系链接
     i = 0
     while i < len(messages):
         msg = messages[i]
 
         if msg.grouped_id:
+            # 收集同一个相册的所有消息
             group = [msg]
             j = i + 1
             while j < len(messages) and messages[j].grouped_id == msg.grouped_id:
                 group.append(messages[j])
                 j += 1
 
+            # 先逐条裁剪，再合并 caption，最后给第一个成员追加链接
             for g in group:
                 trim_message(g)
+            merge_group_captions(group)
+            append_contact_link(group[0])
 
             try:
                 await client.send_file(target, group)
@@ -145,6 +196,8 @@ async def copy_channel_by_date():
                 i += 1
                 await asyncio.sleep(SEND_DELAY)
                 continue
+
+            append_contact_link(msg)
 
             try:
                 await client.send_message(target, msg)
