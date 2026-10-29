@@ -1,15 +1,14 @@
 import asyncio
 import os
 import re
+import random
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
-from telethon import TelegramClient
-import random
+from telethon import TelegramClient, utils
 from telethon.tl import functions, types
 from telethon.helpers import generate_random_long
-from telethon import utils
 from telethon.tl.types import (
     MessageEntityTextUrl,
     InputMediaPhoto,
@@ -30,8 +29,8 @@ SOURCE_CHANNEL = os.getenv("SOURCE_CHANNEL", "")
 TARGET_CHANNEL = os.getenv("TARGET_CHANNEL", "")
 SEND_DELAY = float(os.getenv("SEND_DELAY", "1.0"))
 TIMEZONE = os.getenv("TIMEZONE", "UTC")
-CONTACT_LABEL = os.getenv("CONTACT_LABEL", "投稿联系")
-CONTACT_URL = os.getenv("CONTACT_URL", "https://t.me/my_ccvj3mnxbot")
+CONTACT_LABEL = os.getenv("CONTACT_LABEL", "")
+CONTACT_URL = os.getenv("CONTACT_URL", "")
 MESSAGE_IDS = os.getenv("MESSAGE_IDS", "").strip()
 
 PIN_AFTER_SEND = os.getenv("PIN_AFTER_SEND", "true").lower() in ("1", "true", "yes", "on")
