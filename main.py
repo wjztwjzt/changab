@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from telethon import TelegramClient
+from telethon.helpers import generate_random_long
 from telethon.tl.types import (
     MessageEntityTextUrl,
     InputMediaPhoto,
@@ -122,46 +123,6 @@ def append_contact_link(msg) -> None:
         msg.entities = [entity]
 
 
-def build_input_media(group):
-    """
-    使用 InputSingleMedia 显式包装每个媒体和其对应的 caption。
-    这是 Telethon 中为相册成员单独指定 caption 的正确方式。
-    """
-    media_list = []
-    for idx, g in enumerate(group):
-        cap = g.message if idx == 0 else ""
-        cap_ent = g.entities if idx == 0 else None
-
-        # 1. 先创建底层的 InputMedia 对象（不带 caption）
-        if g.photo:
-            inp = InputPhoto(
-                id=g.photo.id,
-                access_hash=g.photo.access_hash,
-                file_reference=g.photo.file_reference,
-            )
-            base_media = InputMediaPhoto(inp)
-        elif g.document:
-            inp = InputDocument(
-                id=g.document.id,
-                access_hash=g.document.access_hash,
-                file_reference=g.document.file_reference,
-            )
-            base_media = InputMediaDocument(inp)
-        else:
-            print(f"  警告：消息 ID={g.id} 无 photo/document，跳过")
-            continue
-
-        # 2. 用 InputSingleMedia 包装，将 caption 和 entities 绑定到媒体上
-        single_media = InputSingleMedia(
-            media=base_media,
-            random_id=os.urandom(8),  # 需要随机 ID
-            message=cap,
-            entities=cap_ent,
-        )
-        media_list.append(single_media)
-
-    return media_list
-
 
 async def collect_album(client, source, msg):
     """给定相册中的一条消息，收集整个相册的所有成员。"""
@@ -212,22 +173,25 @@ async def send_album(client, target, group):
     merge_group_captions(group)
     append_contact_link(group[0])
 
+    # 长度兜底：单条 caption 上限 1024 字符（UTF-16）
     if _utf16_len(group[0].message) > 1024:
         print(f"  警告：相册 caption 超过 1024，将被截断")
         group[0].message = group[0].message[:1024]
         group[0].entities = None
 
+    # 为每个媒体构造对应的 caption：第一个带合并后的文字，其余为空
+    captions = [group[0].message] + [""] * (len(group) - 1)
+
     try:
-        media = build_input_media(group)
-        if not media:
-            print(f"  相册无有效媒体，跳过")
-            return
-        # 直接传入 InputSingleMedia 列表即可，无需再传 caption 参数
-        await client.send_file(target, media)
-        print(f"  已发送相册（{len(media)} 个媒体，caption 长度 {_utf16_len(group[0].message)}）")
+        # 直接把 Message 对象列表和对应的 caption 列表传给 send_file
+        await client.send_file(
+            target,
+            group,                    # Message 对象列表
+            caption=captions,         # 与 group 一一对应的 caption 列表
+        )
+        print(f"  已发送相册（{len(group)} 个媒体，caption 长度 {_utf16_len(group[0].message)}）")
     except Exception as e:
         print(f"  相册发送失败 (grouped_id={group[0].grouped_id}): {e}")
-
 
 async def main():
     if not API_ID or not API_HASH:
