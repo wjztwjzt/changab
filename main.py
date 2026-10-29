@@ -12,6 +12,7 @@ from telethon.tl.types import (
     InputMediaDocument,
     InputPhoto,
     InputDocument,
+    InputSingleMedia,
 )
 
 load_dotenv()
@@ -123,34 +124,42 @@ def append_contact_link(msg) -> None:
 
 def build_input_media(group):
     """
-    显式构造 InputMedia 列表，把合并后的 caption 和 entities
-    明确绑定到第一个媒体，其余媒体 caption 为空。
+    使用 InputSingleMedia 显式包装每个媒体和其对应的 caption。
+    这是 Telethon 中为相册成员单独指定 caption 的正确方式。
     """
     media_list = []
     for idx, g in enumerate(group):
         cap = g.message if idx == 0 else ""
         cap_ent = g.entities if idx == 0 else None
 
+        # 1. 先创建底层的 InputMedia 对象（不带 caption）
         if g.photo:
             inp = InputPhoto(
                 id=g.photo.id,
                 access_hash=g.photo.access_hash,
                 file_reference=g.photo.file_reference,
             )
-            media_list.append(InputMediaPhoto(
-                inp, caption=cap, caption_entities=cap_ent,
-            ))
+            base_media = InputMediaPhoto(inp)
         elif g.document:
             inp = InputDocument(
                 id=g.document.id,
                 access_hash=g.document.access_hash,
                 file_reference=g.document.file_reference,
             )
-            media_list.append(InputMediaDocument(
-                inp, caption=cap, caption_entities=cap_ent,
-            ))
+            base_media = InputMediaDocument(inp)
         else:
             print(f"  警告：消息 ID={g.id} 无 photo/document，跳过")
+            continue
+
+        # 2. 用 InputSingleMedia 包装，将 caption 和 entities 绑定到媒体上
+        single_media = InputSingleMedia(
+            media=base_media,
+            random_id=os.urandom(8),  # 需要随机 ID
+            message=cap,
+            entities=cap_ent,
+        )
+        media_list.append(single_media)
+
     return media_list
 
 
@@ -160,12 +169,10 @@ async def collect_album(client, source, msg):
         return [msg]
     gid = msg.grouped_id
     result = {msg.id: msg}
-    # 向前找更旧的同 group 消息
     async for m in client.iter_messages(source, offset_id=msg.id, limit=20):
         if m.grouped_id != gid:
             break
         result[m.id] = m
-    # 向后找更新的同 group 消息
     async for m in client.iter_messages(source, min_id=msg.id, limit=20):
         if m.grouped_id != gid:
             break
@@ -205,17 +212,17 @@ async def send_album(client, target, group):
     merge_group_captions(group)
     append_contact_link(group[0])
 
-    # 长度兜底：Telegram 单条 caption 上限 1024 字符（UTF-16）
     if _utf16_len(group[0].message) > 1024:
         print(f"  警告：相册 caption 超过 1024，将被截断")
         group[0].message = group[0].message[:1024]
-        group[0].entities = None  # 简化处理，避免实体越界
+        group[0].entities = None
 
     try:
         media = build_input_media(group)
         if not media:
             print(f"  相册无有效媒体，跳过")
             return
+        # 直接传入 InputSingleMedia 列表即可，无需再传 caption 参数
         await client.send_file(target, media)
         print(f"  已发送相册（{len(media)} 个媒体，caption 长度 {_utf16_len(group[0].message)}）")
     except Exception as e:
@@ -234,7 +241,6 @@ async def main():
     source = await client.get_entity(SOURCE_CHANNEL)
     target = await client.get_entity(TARGET_CHANNEL)
 
-    # 收集消息
     if MESSAGE_IDS:
         ids = [int(x.strip()) for x in MESSAGE_IDS.split(",") if x.strip()]
         print(f"指定 ID 模式：{ids}")
@@ -251,7 +257,6 @@ async def main():
         messages.reverse()
         print(f"共收集到 {len(messages)} 条消息")
 
-    # 按顺序发送
     print("开始复制...")
     i = 0
     while i < len(messages):
