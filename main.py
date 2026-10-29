@@ -6,7 +6,10 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from telethon import TelegramClient
+import random
+from telethon.tl import functions, types
 from telethon.helpers import generate_random_long
+from telethon import utils
 from telethon.tl.types import (
     MessageEntityTextUrl,
     InputMediaPhoto,
@@ -14,6 +17,7 @@ from telethon.tl.types import (
     InputPhoto,
     InputDocument,
     InputSingleMedia,
+    MessageMediaPhoto,
 )
 
 load_dotenv()
@@ -166,6 +170,43 @@ async def send_one(client, target, msg):
     except Exception as e:
         print(f"  消息发送失败 ID={msg.id}: {e}")
 
+def build_input_media(group):
+    """显式构造 InputSingleMedia，用 random.getrandbits(63) 生成 random_id"""
+    media_list = []
+    for idx, g in enumerate(group):
+        cap = g.message if idx == 0 else ""
+        cap_ent = g.entities if idx == 0 else None
+
+        if g.photo:
+            input_media = types.InputMediaPhoto(
+                types.InputPhoto(
+                    id=g.photo.id,
+                    access_hash=g.photo.access_hash,
+                    file_reference=g.photo.file_reference,
+                )
+            )
+        elif g.document:
+            input_media = types.InputMediaDocument(
+                types.InputDocument(
+                    id=g.document.id,
+                    access_hash=g.document.access_hash,
+                    file_reference=g.document.file_reference,
+                )
+            )
+        else:
+            print(f"  警告：消息 ID={g.id} 无 photo/document，跳过")
+            continue
+
+        media_list.append(types.InputSingleMedia(
+            media=input_media,
+            random_id=random.getrandbits(63),
+            message=cap,
+            entities=cap_ent or None,
+        ))
+    return media_list
+
+
+
 
 async def send_album(client, target, group):
     for g in group:
@@ -173,25 +214,51 @@ async def send_album(client, target, group):
     merge_group_captions(group)
     append_contact_link(group[0])
 
-    # 长度兜底：单条 caption 上限 1024 字符（UTF-16）
     if _utf16_len(group[0].message) > 1024:
         print(f"  警告：相册 caption 超过 1024，将被截断")
         group[0].message = group[0].message[:1024]
         group[0].entities = None
 
-    # 为每个媒体构造对应的 caption：第一个带合并后的文字，其余为空
-    captions = [group[0].message] + [""] * (len(group) - 1)
+    media_list = build_input_media(group)
+    if not media_list:
+        print(f"  相册无有效媒体，跳过")
+        return
 
+    # 尝试发送相册
     try:
-        # 直接把 Message 对象列表和对应的 caption 列表传给 send_file
-        await client.send_file(
-            target,
-            group,                    # Message 对象列表
-            caption=captions,         # 与 group 一一对应的 caption 列表
+        request = functions.messages.SendMultiMediaRequest(
+            peer=target,
+            multi_media=media_list,
         )
-        print(f"  已发送相册（{len(group)} 个媒体，caption 长度 {_utf16_len(group[0].message)}）")
+        await client(request)
+        ent_count = len(group[0].entities) if group[0].entities else 0
+        print(f"  已发送相册（{len(media_list)} 个媒体，entities {ent_count} 个）")
+        return  # 成功，直接返回
+
     except Exception as e:
-        print(f"  相册发送失败 (grouped_id={group[0].grouped_id}): {e}")
+        print(f"  相册发送失败（{e}），回退为逐条发送...")
+
+    # 回退方案：逐条发送每个媒体，每个都带上完整 caption
+    for idx, g in enumerate(group):
+        try:
+            # 复制一份，避免修改原消息对象
+            import copy
+            msg_copy = copy.deepcopy(g)
+            # 第一条带上合并后的 caption 和链接，后续留空
+            if idx == 0:
+                msg_copy.message = group[0].message
+                msg_copy.entities = group[0].entities
+            else:
+                msg_copy.message = ""
+                msg_copy.entities = None
+
+            await client.send_message(target, msg_copy)
+            print(f"  已逐条发送媒体 {idx+1}/{len(group)}")
+
+        except Exception as e:
+            print(f"  逐条发送媒体 {idx+1} 失败: {e}")
+
+        await asyncio.sleep(1)  # 每条之间稍作延迟
 
 async def main():
     if not API_ID or not API_HASH:
